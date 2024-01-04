@@ -1,0 +1,544 @@
+---
+title: 'Trabajo Práctico Final: Regresión No Paramétrica y Métodos de Regularización
+  en Modelo Lineal'
+author: "Luz Montserrat, Valentina Durán y Sol Calloni"
+output:
+  html_document:
+    df_print: paged
+---
+
+##  Descarga de librerías necesarias
+
+```{r, warning = FALSE}
+library(readxl)
+library(caret)
+library(ggplot2)
+library(glmnet)
+library(gridExtra)
+```
+
+## Lectura de Datos
+
+Vamos a usar el archivo body.xls donde se encuentran datos de morfología corporal humana. El objetivo principal es estudiar la relación entre el peso y distintas variables morfológicas basándose en 507 individuos: 247 hombres y 260 mujeres. Además, le cambiamos el nombre a las columnas para poder diferenciar cada variable por su nombre.
+
+```{r, results='hide', message=FALSE}
+datos <- read_xls("body.xls", col_names = FALSE)
+colnames(datos)<- (c("BIAC","BIIL","BITRO","CHEST1","CHEST2","ELBOW","WRIST","KNEE","ANKLE","SHOUL","CHESTG","WAISTG","NAVEL","HIP","GLUTE","BICEP","FLOREA","KNEEG","CALF","ANKLEG","WRISTG","AGE","WEIG","HEIG","GEN"))
+```
+
+Notamos que la columna correspondiente al género se le asigno el tipo numeric pero es una variable categórica, por lo tanto corresponde que cambiemos el tipo a factor.
+
+```{r, results='hide'}
+datos[,"GEN"] <- factor(datos$GEN, levels = c(0, 1))
+```
+
+Primero que nada, veamos si hay datos faltantes.
+
+```{r}
+any(is.na(datos))
+```
+Pareciera que no hay datos faltantes.
+
+## Etapa Exploratoria
+
+Nos interesa estudiar algunas características distribucionales de las variables medidas. 
+
+Implementamos dos funciones que nos permiten encontrar el intervalo de confianza de nivel $\alpha$ para la mediana de la variable deseada:
+
+* intervalo_boot_normal: nos devuelve intervalo de confianza de nivel $\alpha$ calculado con el método boostrap normal
+
+* intervalo_boot_percentil: nos devuelve intervalo de confianza de nivel $\alpha$ calculado con el método bootstrap percentil
+
+```{r}
+estadisticos_boot <-function(x, B = 1000){
+  titahatboot <- rep(0, B) #vector de ceros de tamaño B
+  for(i in 1:B){
+    Xboot <- sample(x, length(x), replace = TRUE)
+    titahatboot[i] <- median(Xboot)
+  }
+  titahatboot
+}
+
+intervalo_boot_normal <- function(x, alfa = 0.05){
+  titahatboot <- estadisticos_boot(x)
+  se_boot <- sqrt(mean((titahatboot-mean(titahatboot))**2))
+  intervalo_boot <- c(median(x) - qnorm(1-alfa/2)*se_boot, median(x) + qnorm(1-alfa/2)*se_boot)
+
+  return( list(intervalo_boot, titahatboot))
+}
+
+intervalo_boot_percentil <- function(x, alfa = 0.05){
+  titas_boot <- estadisticos_boot(x)
+  
+  cota_inferior <- quantile(titas_boot, alfa/2)[[1]]
+  cota_superior <- quantile(titas_boot, 1-alfa/2)[[1]]
+  intervalo_boot <- c(cota_inferior, cota_superior)
+
+  intervalo_boot
+}
+```
+
+Ahora que tenemos implementadas las funciones, comenzamos analizando la variable peso (WEIG) según el género.
+
+Podemos observar cuál es la mediana del peso de las mujeres y los hombres.
+
+```{r}
+median(datos[datos$GEN == 0, ]$WEIG)
+median(datos[datos$GEN == 1, ]$WEIG)
+```
+
+Se puede observar que la mediana del peso de las mujeres es más chica que la de los hombres.
+
+### Método paramétrico
+
+Veamos el intervalo de confianza que obtenemos al usar el método boostrap normal.
+
+```{r}
+i_c_normal_m <- intervalo_boot_normal(datos[datos$GEN == 0, ]$WEIG)
+i_c_normal_h <-intervalo_boot_normal(datos[datos$GEN == 1, ]$WEIG)
+
+print(i_c_normal_h[[1]])
+print(i_c_normal_m[[1]])
+```
+
+Podemos observar que el intervalo de confianza para la mediana del peso de las mujeres nos dió [57.8kg, 60.2kg], mientras que el de los hombres nos dió [74.8kg, 79.8kg]. Este resultado parece coherente pues la mediana de las mujeres dió 59kg y la de los hombres 77.3kg.
+
+Por lo tanto, en base a los resultados obtenidos, podemos concluir que en general el peso de las mujeres es mucho menor al de los hombres.
+
+El método bootstrap normal se podía utilizar con la hipótesis de que el estimador de la media del peso tiene una distribución aproximadamente normal. Por lo tanto, verifiquemos esta hipótesis con las realizaciones de $\hat{\theta}$ haciendo un qqplot.
+
+```{r, warning = FALSE}
+g1 <- ggplot(as.data.frame(i_c_normal_h[[2]]), aes(sample = i_c_normal_h[[2]])) + 
+  geom_qq(distribution = qnorm, dparams = list(mean = mean(i_c_normal_h[[2]]), sd = sd(i_c_normal_h[[2]])), col = 'darkorchid') + 
+  geom_qq_line(distribution = qnorm, dparams = list(mean = mean(i_c_normal_h[[2]]), sd = sd(i_c_normal_h[[2]])), col = 'darkorchid4', size = 1) +
+  labs(title = "Gráfico Q-Q de los hombres")+
+  xlab("Cuantiles teóricos") +  
+  ylab("Cuantiles observados")
+
+g2 <- ggplot(as.data.frame(i_c_normal_m[[2]]), aes(sample = i_c_normal_m[[2]])) + 
+  geom_qq(distribution = qnorm, dparams = list(mean = mean(i_c_normal_m[[2]]), sd = sd(i_c_normal_m[[2]])), col = 'aquamarine3') + 
+  geom_qq_line(distribution = qnorm, dparams = list(mean = mean(i_c_normal_m[[2]]), sd = sd(i_c_normal_m[[2]])), col = 'aquamarine4', size = 1) +
+  labs(title = "Gráfico Q-Q de las mujeres")+
+  xlab("Cuantiles teóricos") +  
+  ylab("Cuantiles observados")
+
+grid.arrange(g1, g2, nrow = 1)
+```
+
+Vemos que los datos de ambos gráficos parecieran asemejarse a una distribución normal. Por lo tanto, se cumple la hipótesis.
+
+### Método no paramétrico
+
+Veamos ahora el intervalo de confianza usando el método bootstrap percentil.
+
+```{r}
+intervalo_boot_percentil(datos[datos$GEN == 0, ]$WEIG)
+intervalo_boot_percentil(datos[datos$GEN == 1, ]$WEIG)
+```
+
+Vemos que el intervalo de confianza es muy similar al obtenido con el método bootstrap normal.
+
+A continuación hagamos un diagrama de dispersión de Altura(eje x) vs. Peso(eje y) discriminando por género para ver como las variables pueden cambiar de acuerdo al género.
+
+```{r}
+col_gen <- c('aquamarine3', 'darkorchid')
+names(col_gen) <- levels(datos$GEN)
+plot(datos$HEIG, datos$WEIG, xlab = "Altura (cm)", ylab = "Peso (kg)", main = "Altura vs Peso según género", col = col_gen[datos$GEN], pch = 21)
+legend('topleft', legend = c("Mujeres", "Hombres"), col = col_gen, pch = 21)
+
+```
+
+En base al gráfico podemos decir que los datos correspondientes a las mujeres se encuentran en valores menores con respecto a los hombres, tanto en altura como en peso. Además, podemos notar que tanto para los hombres como para las mujeres hay una relación proporcional entre el peso y la altura, a mayor altura mayor peso y viceversa.
+
+Ahora interesa explorar esta relación entre las variables WEIG y HEIG en cada género. Ajustamos para cada género una regresión no paramétrica usando el núcleo normal. Además, agregamos al gráfico las dos regresiones obtenidas.
+
+```{r}
+plot(datos$HEIG, datos$WEIG, xlab = "Altura (cm)", ylab = "Peso (kg)", main = "Altura vs Peso según género", col = col_gen[datos$GEN], pch = 21)
+legend('topleft', legend = c("Mujeres", "Hombres"), col = col_gen, pch = 21)
+estimacion_mujeres <- ksmooth(datos[datos$GEN == 0, ]$HEIG, datos[datos$GEN == 0, ]$WEIG, kernel = "normal", bandwidth = 10)
+lines(estimacion_mujeres$x, estimacion_mujeres$y, col = "aquamarine4", lwd = 3)
+estimacion_hombres <- ksmooth(datos[datos$GEN == 1, ]$HEIG, datos[datos$GEN == 1, ]$WEIG, kernel = "normal", bandwidth = 10)
+lines(estimacion_hombres$x, estimacion_hombres$y, col = "darkorchid4", lwd = 3)
+```
+
+Para ambos géneros podemos notar que obtuvimos una estimación que pareciera ser lineal, a mayor altura mayor peso tiene la persona. Además, si vemos el gráfico, pareciera que ambas rectas tienen una pendiente similar aunque la de los hombres se encuentra por encima del de las mujeres. Esto se corresponde con lo que habíamos observado antes y con lo que hubieramos esperado obtener, en los datos de los hombres se registra mayor peso y altura que los de las mujeres. 
+
+Por otro lado, notamos que la estimación de los hombres no es tan recta como la de las mujeres, lo cual podría deberse a que en el caso de los hombres con una misma altura podemos encontrar mayor rango de peso, en cambio, en las mujeres pareciera haber más concentración de datos dada una altura específica.
+
+Implementamos una función que realiza la búsqueda de la ventana óptima para ksmooth con núcleo normal para el parámetro bandwidth. Para ello, utlizamos el criterio de convalidación cruzada basado en leave-one-out y realizamos la búsqueda en una grilla de bandwidth entre 5 y 20 con paso 0.5. Tomaremos a la ventana óptima como aquella que minimiza la función CV:
+
+$$CV(h) = \frac{1}{n} \sum_{i=1}^{n} \left(Y_i - \hat{m}_h^{-i}(X_i)\right)^2$$
+```{r}
+convalidacion_cruzada <- function(data, h_posibles){
+  min_h <- 0
+  min_cv_h <- Inf
+  CV <- c()
+  
+  for (j in 1:length(h_posibles)) {
+    residuo <- c()
+    for (i in 1:length(data$WEIG)) {
+      datos_sin_i <- data[-i, ] #sacamos la i-ésima fila
+      estimacion_peso <- ksmooth(datos_sin_i$HEIG, datos_sin_i$WEIG, kernel = "normal", bandwidth = h_posibles[j], x.points = data[i,]$HEIG)$y
+      residuo[i] <- data[i,]$WEIG - estimacion_peso
+    }
+    cv_h <- sum(residuo**2)
+    CV[j] <- cv_h
+    if (cv_h < min_cv_h){
+      min_h = h_posibles[j]
+      min_cv_h = cv_h
+    }
+  }
+  return(list("CV"= CV, "h min" = min_h, "CV(h_min)" = min_cv_h))
+}
+```
+
+Nos guardamos los datos de mujeres y hombres por separado. Luego, llamamos a la función con una secuencia de ventanas que va desde 5 a 20 con un paso de 0.5, como pedido.
+
+```{r}
+datos_mujeres <- datos[datos$GEN == 0, ]
+datos_hombres <- datos[datos$GEN == 1, ]
+h_posibles <- seq(5,20,by = 0.5)
+
+info_op_m <- convalidacion_cruzada(datos_mujeres, h_posibles)
+info_op_h <- convalidacion_cruzada(datos_hombres, h_posibles)
+```
+
+Obtuvimos que la ventana donde se minimiza la función CV es h = 8 para ambos:
+
+```{r}
+info_op_m[c("h min", "CV(h_min)")]
+info_op_h[c("h min", "CV(h_min)")]
+```
+
+Para cada género graficamos la función objetivo y representamos la ventana óptima.
+
+```{r}
+plot(h_posibles, info_op_m[["CV"]], main = "CV Mujeres", ylab = "CV(h)", xlab = "h", col = "aquamarine2", pch = 19)
+abline(v = info_op_m[["h min"]], lwd = 3, col = "aquamarine4")
+axis(1, at = seq(5,20,by = 1))
+```
+
+```{r}
+plot(h_posibles, info_op_h[["CV"]], main = "CV Hombres", ylab = "CV(h)", xlab = "h", col = "darkorchid2", pch = 19)
+abline(v = info_op_h[["h min"]], lwd = 3, col = "darkorchid4")
+axis(1, at = seq(5,20,by = 1))
+```
+
+Ahora para cada género realizamos el diagrama de dispersión de Altura vs. Peso usando todos los datos y superponemos la estimación de la regresión no paramétrica que obtenemos con la ventana óptima hallada. Además, superponemos la recta que se obtiene utilizando el método de mínimos cuadrados. 
+
+Para eso, primero nos guardamos la estimación por mínimos cuadrados y estimación de la regresión no paramétrica.
+```{r}
+modelo_lineal_mujeres <- lm(WEIG ~ HEIG, datos_mujeres)
+modelo_lineal_hombres <- lm(WEIG ~ HEIG, datos_hombres)
+
+modelo_no_param_mujeres <- ksmooth(datos_mujeres$HEIG, datos_mujeres$WEIG, kernel = "normal", bandwidth = info_op_m[["h min"]])
+modelo_no_param_hombres <- ksmooth(datos_hombres$HEIG, datos_hombres$WEIG, kernel = "normal", bandwidth = info_op_h[["h min"]])
+```
+
+```{r}
+plot(datos[datos$GEN == 0, ]$HEIG, datos[datos$GEN == 0, ]$WEIG, xlab = "Altura (cm)", ylab = "Peso (kg)", main = "Altura vs. Peso Mujeres", col = "aquamarine3", pch = 21)
+lines(modelo_no_param_mujeres$x, modelo_no_param_mujeres$y, col = "aquamarine4", lwd = 3)
+
+abline(modelo_lineal_mujeres, col = "slateblue3", lwd = 3)
+
+legend('topleft', legend = c("No parametrico", "Mínimos cuadrados"), col = c("aquamarine4", "slateblue3"), pch = 20)
+```
+
+```{r}
+plot(datos[datos$GEN == 1, ]$HEIG, datos[datos$GEN == 1, ]$WEIG, xlab = "Altura (cm)", ylab = "Peso (kg)", main = "Altura vs. Peso Hombres", col = "darkorchid", pch = 21)
+lines(modelo_no_param_hombres$x, modelo_no_param_hombres$y, col = "darkorchid4", lwd = 3)
+abline(modelo_lineal_hombres, col = "violetred3", lwd = 3)
+legend('topleft', legend = c("No parametrico", "Mínimos cuadrados"), col = c("darkorchid4", "violetred3"), pch = 20)
+```
+
+Notamos que tanto para las estimaciones de los hombres como para las de las mujeres, las estimaciones no paramétricas se asemejan bastante a lo obtenido por minimos cuadrados. Se puede volver a notar que la estimación no paramétrica de los hombres tiene más curvas que la de las mujeres, y creemos que se debe a lo mismo de antes. Además, podemos ver una gran semejanza entre la estimación por mínimos cuadrados y la estimación del modelo no paramétrico, por lo tanto con cualquiera de los modelos obtendríamos resultados similares.
+
+## Regresión Lineal
+
+Usando un mecanismo aletorio se dividió la muestra en dos partes: entrenamiento y testeo. En el archivo TrainTest.txt los TRUE’s representan los datos en la muestra de entrenamiento y los FALSE’s los datos en la muestra de testeo. 
+
+Nos guardamos por separado los datos que usaremos para entrenar al modelo y los que usaremos para testearlo.
+
+```{r}
+indices_entrenamiento <- read.csv("TrainTest.txt", head = FALSE)
+datos_entrenamiento <- datos[indices_entrenamiento$V1, ]
+datos_entrenamiento[, "GEN"] <- factor(datos_entrenamiento$GEN) 
+datos_testeo <- datos[!indices_entrenamiento$V1, ]
+datos_testeo[,"GEN"] <- factor(datos_testeo$GEN)
+```
+
+Utilizando los datos de entrenamiento, ajustaremos un modelo lineal para el peso basado en todas las variables explicativas.
+
+```{r}
+modelo_peso <-lm(WEIG ~ BIAC+BIIL + BITRO + CHEST1 + CHEST2 + ELBOW + WRIST  + KNEE + ANKLE + SHOUL + CHESTG + WAISTG + NAVEL + HIP + GLUTE + BICEP + FLOREA + KNEEG + CALF + ANKLEG + WRISTG + AGE + HEIG + GEN, datos_entrenamiento)
+
+summary(modelo_peso)
+```
+
+
+Veamos qué covariables del modelo son las más significativas. Para esto, vamos a llamar significativas a las variables que tienen un p-valor lo suficientemente chico. Podemos observar las siguientes variables:
+
+- **Intercept:** Variable independiente del modelo
+
+- **CHEST1:** Profundidad del tórax entre la columna y el esternón, a mitad de la espiración 
+
+- **CHESTG:** Circunferencia del pecho a mitad de la espiración
+
+- **WAITSG:** Circunferencia de la cintura, promedio de la posición contraída y relajada
+
+- **HIP:** Circunferencia de la cadera al nivel del diámetro bitrocantéreo
+
+- **GLUTE:** Circunferencia del muslo por debajo del pliegue del glúteo, promedio de las circunferencias derecha e izquierda
+
+- **FLOREA:** Circunferencia del antebrazo, extendido, palma hacia arriba, promedio de circunferencias derecha e izquierda
+
+- **CALF:** Circunferencia máxima de pantorrilla, promedio de circunferencias derecha e izquierda
+
+- **AGE:** Edad (años)
+
+- **HEIG:** Altura (cm) 
+
+- **KNEE:** Diámetro de rodilla, suma de dos rodillas 
+
+- **GEN1:** Género (1 - masculino, 0 - femenino)
+
+Estas variables son significativas a cualquiera de los niveles habituales pues tienen un p-valor menor a 0.01. Luego, para las variables:
+
+- **SHOUL:** Circunferencia de hombros sobre los músculos deltoides 
+
+- **KNEEG:** Circunferencia de rodilla sobre rótula, posición ligeramente flexionada, promedio de circunferencias derecha e izquierda
+
+Cuando miramos con un nivel de significación 0.05 y 0.1 rechazamos que el coeficiente que la acompaña en el modelo sea cero, es decir, son significativas a estos niveles pero no lo son a nivel 0.01. Las demás variables no son lo suficientemente significativas para el modelo, con lo cual, podemos concluir que podríamos no tenerlas en cuenta.
+
+Podemos ver qué obtenemos al testear que todos los valores de los coeficientes que acompañan a las variables sean 0, excepto el Intercept. Veamos el valor del estadístico F, es decir, el estadístico del test.
+```{r}
+summary(modelo_peso)$fstatistic
+```
+Podemos notar que en el modelo con todas las variables nos encontramos con que el estadístico F nos dió un valor bastante grande y vemos que el test nos dió un p-valor muy chico. Sin embargo, si miramos el error estándar de los $\hat{\beta}$ donde el test individual no rechaza (pues nos da un p-valor grande), notamos que tiene un valor mayor o muy parecido al $\hat{\beta}$. Es por esto que no se rechaza, ya que solamente rechazamos cuando el siguiente estadístico toma valores grandes:
+$$T = \frac{\hat{\beta}}{\sqrt{\text{Var}(\hat{\beta)}}}$$
+La razón de esto es la colinealidad entre variables. Esto nos indica que seguramente para obtener un mejor modelo, tendremos que sacar variables que estén fuertemente relacionadas entre sí.
+
+Ahora que sabemos todo esto, hacemos un modelo con las variables que nos parecieron significativas anteriormente.
+```{r}
+modelo_peso2 <-lm(WEIG ~ CHEST1 + KNEE + SHOUL + CHESTG + WAISTG + HIP + GLUTE + FLOREA + KNEEG + CALF + AGE + HEIG + GEN, datos_entrenamiento)
+
+summary(modelo_peso2)
+```
+
+Veamos ahora la correlación entre las diferentes variables explicativas para buscar colinealidad entre variables y seguir descartando las innecesarias. Para ello, realizamos un heatmap de la matriz de correlación entre variables:
+
+```{r}
+datos_para_matriz <- datos
+datos_para_matriz[, "GEN"] <- as.numeric(datos$GEN)
+datos_matriz <- as.matrix(datos_para_matriz)
+
+matriz_correlacion <- cor(datos_matriz)
+
+datos_correlacion <- as.data.frame(as.table(matriz_correlacion))
+
+colnames(datos_correlacion) <- c("Covariables1", "Covariables2", "Correlacion")
+
+ggplot(data = datos_correlacion, aes(Covariables1, Covariables2, fill = Correlacion)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "seagreen2", mid = "white", high = "hotpink1", midpoint = 0, limit=c(-1,1)) +
+  theme_minimal() +
+  labs(title = "Heatmap de correlación entre variables") +
+  xlab(" ") +
+  ylab(" ") +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+```
+
+Podemos observar en el mapa que en la diagonal tenemos que la correlación siempre es 1 ya que son las variables relacionadas con ellas mismas. Además, vemos que la variable AGE tiene muy baja correlación con todas las demás variables ya que está casi toda su columna y fila en blanco. Por otro lado, vemos que las variables que más se relacionan entre sí son FLOREA y BICEP, y WAISTG y WEIG. Al ver cuáles variables eran las más significativas, nos quedamos con FLOREA pero no con BICEP, lo que tiene sentido porque al estar tan relacionadas entre sí es como tener la misma variable dos veces. Además, la variable que queremos predecir es WEIG y como está tan relacionada con WAISTG, es lógico que sea significativa para el modelo. Al contrario, una de las variables que menos se relaciona con WEIG, además de AGE, es la variable BIIL, y a esta no la dejamos en el nuevo modelo. 
+
+Luego, nos quedamos con las variables que nos parecían significativas del primer modelo planteado para poder hacer un heatmap de estas nuevas variables y ver mejor cuáles están relacionadas entre sí.
+
+```{r}
+datos2 <-datos[, c("WEIG","CHEST1","KNEE","SHOUL","CHESTG","WAISTG","HIP","GLUTE","AGE","FLOREA","KNEEG","CALF","HEIG","GEN")]
+```
+
+Hacemos el heatmap de las nuevas variables:
+
+```{r}
+datos_para_matriz2 <- datos2
+datos_para_matriz2[, "GEN"] <- as.numeric(datos2$GEN)
+datos_matriz2 <- as.matrix(datos_para_matriz2)
+
+matriz_correlacion2 <- cor(datos_matriz2)
+
+datos_correlacion2 <- as.data.frame(as.table(matriz_correlacion2))
+
+colnames(datos_correlacion2) <- c("Covariables1", "Covariables2", "Correlacion")
+
+ggplot(data = datos_correlacion2, aes(Covariables1, Covariables2, fill = Correlacion)) +
+  geom_tile(color = "white") +
+  geom_text(aes(Covariables1, Covariables2, label = round(Correlacion, digits = 2)), color = "black", size = 3.5)+
+  scale_fill_gradient2(low = "seagreen2", mid = "white", high = "hotpink1", midpoint = 0, limit=c(-1,1)) +
+  theme_minimal() +
+  labs(title = "Heatmap de correlación entre variables") +
+  xlab(" ") +
+  ylab(" ") +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+```
+
+Vemos que las variables que más están correlacionadas entre sí son SHOUL, CHESTG y WAISTG. Por lo tanto, de estas 3 podríamos dejar una sola de ellas ya que con la variable WEIG todas se relacionan bastante. Elegimos la variable WAISTG, entonces sacamos las otras dos de los datos. Además, como dijimos anteriormente, la variable AGE no está muy relacionada con ninguna de las demás variables, por lo que podríamos sacarla del modelo porque en particular tampoco tiene mucha relación con la variable WEIG que es la que estamos analizando. Otras variables que están muy relacionadas entre sí son GLUTE y HIP, y CALF y KNEEG, por lo que podríamos quedarnos con una de ellas. Vemos que HIP y KNEEG están mas relacionadas con WEIG, por lo que preferimos quedarnos con estas.
+
+Veamos como quedó el nuevo heatmap con las variables definitivas:
+
+```{r}
+datos3 <-datos2[, c("WEIG","CHEST1","KNEE","WAISTG","HIP","FLOREA","KNEEG","HEIG","GEN")]
+datos_para_matriz3 <- datos3
+datos_para_matriz3[, "GEN"] <- as.numeric(datos3$GEN)
+datos_matriz3 <- as.matrix(datos_para_matriz3)
+
+matriz_correlacion3 <- cor(datos_matriz3)
+
+datos_correlacion3 <- as.data.frame(as.table(matriz_correlacion3))
+
+colnames(datos_correlacion3) <- c("Covariables1", "Covariables2", "Correlacion")
+
+ggplot(data = datos_correlacion3, aes(Covariables1, Covariables2, fill = Correlacion)) +
+  geom_tile(color = "white") +
+  geom_text(aes(Covariables1, Covariables2, label = round(Correlacion, digits = 2)), color = "black", size = 4)+
+  scale_fill_gradient2(low = "seagreen2", mid = "white", high = "hotpink1", midpoint = 0, limit=c(-1,1)) +
+  theme_minimal() +
+  labs(title = "Heatmap de correlación entre variables") +
+  xlab(" ") +
+  ylab(" ") +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+```
+
+Planteamos el nuevo modelo con las variables elegidas:
+
+```{r}
+modelo_peso_final <-lm(WEIG ~ CHEST1 + KNEE + WAISTG + HIP + FLOREA + KNEEG + HEIG + GEN, datos_entrenamiento)
+
+summary(modelo_peso_final)
+```
+
+Vemos que todas las variables son significativas para el nuevo modelo. Además, vemos que el R cuadrado da muy cercano a 1, por lo que podemos afirmar que nuestro modelo es bueno. Vemos que la varianza residual se mantuvo cercana al primer valor, incluso habiendo sacado muchas variables.
+
+Ahora veamos como nos va con los datos de testeo al hacer la siguiente cuenta:
+$$R^2_{} = 1 - \frac{\sum_{i=1}^{n}({y_i} - \hat{y})^2}{\sum_{i=1}^{n}({y_i} - \bar{y})^2}$$
+```{r}
+numerador2 <- sum((datos_testeo$WEIG - predict(modelo_peso_final,datos_testeo))**2)
+denominador2 <- sum((datos_testeo$WEIG - mean(datos_testeo$WEIG))**2)
+1-(numerador2/denominador2)
+```
+Vemos que nos da cercano a 1, lo cual nos da un indicio de que el modelo es bueno.
+
+Calculemos ahora el error de predicción empírico del primer modelo ajustado y el del nuevo modelo ajustado en el grupo de testeo que es la siguiente cuenta:
+$$\frac{1}{n} \sum_{i=1}^{n} \left(y_i - \hat{y}_i\right)^2$$
+```{r}
+residuos <- datos_testeo$WEIG - predict(modelo_peso, datos_testeo) #primer modelo
+
+error_empirico_todas_variables <- mean(residuos**2)
+print(error_empirico_todas_variables)
+```
+
+```{r}
+residuos_final <- datos_testeo$WEIG - predict(modelo_peso_final, datos_testeo) #modelo final
+
+error_empirico_intuitivo <- mean(residuos_final**2)
+print(error_empirico_intuitivo)
+```
+
+El error de predicción del modelo final nos dió un poco peor que el del primer modelo. Esto tiene sentido ya que en el viejo modelo usamos más variables por lo que es esperable tener un mejor ajuste. 
+
+### Elección de modelo usando el método LASSO
+
+Queremos minimizar la siguiente cuenta:
+$$\hat{\beta}_{\text{LASSO}} = \operatorname*{arg\,min}_b \left\{ \frac{1}{2n} \sum_{i=1}^{n} \left[ y_i - x_i^t b \right]^2 + \lambda \sum_{j=1}^{p} |b_j| \right\}$$
+
+Al usar glmnet obtenemos los coeficientes del modelo ajustado mediante regularización Lasso. Estos coeficientes mostrarán la importancia de cada variable en el modelo y cómo contribuyen a lo que queríamos predecir, en nuestro caso, la variable WEIG.
+
+```{r}
+set.seed(999)
+
+matriz_diseño_sin_intercept <- model.matrix(lm(WEIG ~ . - 1, data = datos_entrenamiento)) 
+modelo_lasso <-  glmnet(x = matriz_diseño_sin_intercept,  y = datos_entrenamiento$WEIG, alpha = 1)
+
+muestra <- c(2, 15, 30, 45)
+coef(modelo_lasso)[,muestra]
+```
+
+En cada columna tenemos el valor que se le asigna a los coeficientes de cada variable fijado el λ. 
+Notamos que, al revés de lo que hubiésemos pensado, la variable de género nunca es seleccionada para el modelo, esto podría deberse a que esta característica se ve reflejada en las otras variables.
+
+Graficamos para cada logaritmo de λ el valor del coeficiente que acompaña a las variables.
+```{r}
+L <- length(modelo_lasso$lambda)
+y <- modelo_lasso$beta[, L]
+labs <- names(y)
+plot(modelo_lasso, xvar = "lambda")
+legend('topright', legend=labs, col=1:length(labs),lty=1, cex = 0.53, x.intersp = 0.1, x = "right")
+```
+
+Podemos observar en el gráfico que mientras mas grande sea λ, mas se achican los coeficientes que acompañan las variables, es decir, más "castigamos" a los coeficientes para poder obtener un modelo simple.
+
+Estudiemos cuál es el λ óptimo y cuál es el que se consigue usando el criterio de un desvío para elegir el parámetro de regularización.
+
+```{r}
+cv_lasso <- cv.glmnet(matriz_diseño_sin_intercept, datos_entrenamiento$WEIG)
+cv_lasso$lambda.min
+cv_lasso$lambda.1se
+```
+
+Veamos el error cuadrático medio de estos dos λ gráficamente calculado con cross-validation.
+```{r}
+plot(cv_lasso, ylim=c(4,5.5), ylab = "Error cuadrático medio")
+
+lambda_min <- cv_lasso$lambda.min
+lambda_1se <- cv_lasso$lambda.1se
+
+text(log(lambda_min), 4 , label = paste("λ mínimo:", round(lambda_min,2)), pos = 3)
+text(log(lambda_1se), 4, label = paste("λ un desvío:", round(lambda_1se,2)), pos = 3)
+
+``` 
+
+El "λ mínimo" es el λ que minimiza el error cuadrático medio mientras que "λ un desvío" es el que solemos tomar como óptimo ya que lo que hace es tomar el mínimo y hacerle alguna modificación.  
+
+Nos quedamos con los coeficientes que toma el λ de un desvío standard. Veamos el modelo que nos queda.
+
+```{r}
+coef.glmnet(cv_lasso, s = "lambda.1se")
+```
+
+Comparemos este modelo LASSO con nuestro primer modelo donde utilizamos todas las variables y con nuestro modelo que elegimos intuitivamente. 
+
+```{r}
+print(modelo_peso$coefficients)
+print(modelo_peso_final$coefficients)
+print(coef.glmnet(cv_lasso, s = "lambda.1se"))
+```
+
+Podemos observar que el Intercept en los tres modelos nos quedó negativo. Luego, comparando qué variables quedaron distintas de cero en el modelo intuitivo y el LASSO, vemos que la única variable que quedó en el primero mencionado pero no en el segundo es la variable relacionada con el género (GEN1). Además, el modelo LASSO tiene más variables, entre ellas: CHEST2, SHOUL, CHESTG, GLUTE, BICEP y CALF.    
+Además, podemos observar que aquellas variables tomadas por LASSO tienen coeficientes con valores positivos en todos los modelos. Por lo cual, podemos interpretar que mayor registro de estas variables representa un mayor peso. 
+
+Calculemos el error de predicción empírico en el grupo de testeo.
+```{r}
+matriz_testeo <- model.matrix(lm(WEIG ~ . - 1, data = datos_testeo)) 
+residuos_LASSO <- datos_testeo$WEIG - predict(cv_lasso, s = "lambda.1se", newx = matriz_testeo)
+
+error_empirico_LASSO <- mean(residuos_LASSO**2)
+print(error_empirico_LASSO)
+```
+
+Comparemos los errores de los diferentes tipos de modelo.
+```{r}
+print(error_empirico_todas_variables)
+print(error_empirico_intuitivo)
+print(error_empirico_LASSO)
+```
+Podemos notar que el modelo con menor error empírico sigue siendo el primero donde utilizamos todas las variables, lo cual ya habíamos dicho que tenía sentido ya que mientras más variables usamos menor suele ser el error. Sin embargo, el modelo se complejiza. Por lo tanto, consideramos que eligiríamos cualquiera de los otros dos modelos pues usando muchas menos variables conseguimos un error un poco más grande, sobre todo con el modelo LASSO.
+
+## Conclusión
+
+El trabajo que realizamos se centró en el análisis de datos morfológicos corporales humanos donde estudiamos la relación entre el peso y otras variables.
+
+En la primer etapa, es decir, la exploratoria, analizamos los datos y aplicamos métodos de intervalos de confianza del peso diferenciando entre hombres y mujeres, utilizando técnicas paramétricas y no paramétricas del método bootstrap. Conluimos que, en general, el peso de las mujeres es menor que el de los hombres. Además, exploramos la relación entre altura y peso discriminando por género, confirmando que las mujeres tienden a tener valores menores en ambas variables en comparación con los hombres. Ajustamos regresiones no paramétricas por género y pudimos evidenciar una relación lineal entre altura y peso, donde los hombres registraron valores más altos. Por otro lado, buscamos, utilizando el método de cross-validation, la ventana óptima utilizada en los métodos no paramétricos.
+
+Luego, ajustamos modelos lineales para predecir el peso basado en múltiples variables. Identificamos las variables más significativas mediante pruebas de hipótesis y eliminamos aquellas con alta colinealidad o baja relación con la variable WEIG. Comprobamos la calidad de los modelos obtenidos utilizando los datos de entrenamiento y testeo, encontrando un buen ajuste y una baja varianza residual en el modelo final.
+
+Exploramos la posibilidad de utilizar el método de regularización LASSO para mejorar la selección de variables y ajuste del modelo. Realizamos un análisis de correlación entre las variables seleccionadas y evaluamos la eficacia del modelo LASSO en comparación con el modelo con todas las variables y modelo con las variables ajustadas por nosotras.
+
+Finalmente, llegamos a la conclusión de que la elección del mejor modelo depende de considerar cuidadosamente los objetivos del análisis. Si priorizamos tener un menor error empírico, a pesar de tener un modelo complejo, podemos elegir el modelo con todas las variables. En cambio, si preferimos tener un modelo más simple a pesar de tener un poco más de error, elegiríamos el modelo propuesto por nosotras intuitivamente. Por otro lado, el modelo LASSO nos permite tener un error muy parecido al de todas las variables y ser más simple, además de tener en cuenta la multicolinealidad entre variables de manera más precisa que el ajustado a mano. Asimismo, el modelo propuesto por nosotras requirió mucho más análisis y tiempo a diferencia del de LASSO. Por lo tanto, considerando todo lo anterior, podemos concluir que el mejor modelo es el modelo LASSO. 
