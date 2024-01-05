@@ -1,6 +1,6 @@
 # Análisis de Morfología Corporal Humana
 
-Este repositorio contiene el código y los resultados de un análisis de datos morfológicos corporales humanos, enfocado en la relación entre el peso y variables morfológicas en 507 individuos.
+Este repositorio contiene el código en R y los resultados de un análisis de datos morfológicos corporales humanos, enfocado en la relación entre el peso y variables morfológicas en 507 individuos.
 
 A lo largo del trabajo realizamos:
 
